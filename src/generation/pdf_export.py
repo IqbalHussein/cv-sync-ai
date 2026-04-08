@@ -1,5 +1,24 @@
 from datetime import datetime
+from pathlib import Path
 from fpdf import FPDF
+
+
+def _get_unicode_font_path() -> str:
+    """
+    Locate the DejaVuSans TTF font bundled with matplotlib.
+
+    Returns:
+        Absolute path to DejaVuSans.ttf.
+
+    Raises:
+        FileNotFoundError: If the font file cannot be located.
+    """
+    import matplotlib
+    font_dir = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+    regular = font_dir / "DejaVuSans.ttf"
+    if regular.exists():
+        return str(regular)
+    raise FileNotFoundError("DejaVuSans.ttf not found in matplotlib font directory.")
 
 
 def cover_letter_to_pdf(
@@ -18,22 +37,26 @@ def cover_letter_to_pdf(
     Returns:
         Raw PDF bytes suitable for Streamlit's download_button.
     """
+    font_path = _get_unicode_font_path()
+
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=25)
+    pdf.add_font("DejaVu", "", font_path)
+    pdf.add_font("DejaVu", "B", font_path)
     pdf.add_page()
 
-    pdf.set_font("Helvetica", size=10)
+    pdf.set_font("DejaVu", size=10)
     pdf.set_text_color(100, 100, 100)
     date_str = datetime.now().strftime("%B %d, %Y")
     pdf.cell(0, 8, date_str, align="R", new_x="LMARGIN", new_y="NEXT")
 
     pdf.ln(4)
 
-    pdf.set_font("Helvetica", style="B", size=14)
+    pdf.set_font("DejaVu", style="B", size=14)
     pdf.set_text_color(30, 30, 30)
     pdf.cell(0, 10, f"Cover Letter: {job_title}", new_x="LMARGIN", new_y="NEXT")
 
-    pdf.set_font("Helvetica", size=10)
+    pdf.set_font("DejaVu", size=10)
     pdf.set_text_color(80, 80, 80)
     pdf.cell(0, 6, company, new_x="LMARGIN", new_y="NEXT")
 
@@ -44,7 +67,7 @@ def cover_letter_to_pdf(
 
     clean_text = _strip_markdown(cover_letter_text)
 
-    pdf.set_font("Helvetica", size=11)
+    pdf.set_font("DejaVu", size=11)
     pdf.set_text_color(40, 40, 40)
 
     paragraphs = clean_text.split("\n\n")

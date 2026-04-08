@@ -1,6 +1,6 @@
 # Description
 
-**AI Resume Matcher is a project designed to pull the technical skills from a job posting and compare them against resumes to show highlights and weak points.
+**CVSyncAI is a project designed to pull the technical skills from a job posting and compare them against resumes to show highlights and weak points.
 
 # Setup
 

@@ -216,8 +216,7 @@ def parse_jobs_from_file(filename):
                 pass
 
         return title, company
-    with open("sample-postings.txt", "r", encoding="utf-8") as file:
-        raw_file_data = file.read()
+    raw_file_data = read_text_file(filename)
 
     jobs = raw_file_data.split("====")
 

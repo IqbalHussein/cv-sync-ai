@@ -7,7 +7,7 @@ from src.matching.matcher import match_resume_to_jobs
 
 def main():
     """
-    Main entry point for the AI Resume Matcher application.
+    Main entry point for the CVSyncAI application.
     
     This function orchestrates the complete workflow:
     1. Parses job postings from a text file and saves structured data to JSON

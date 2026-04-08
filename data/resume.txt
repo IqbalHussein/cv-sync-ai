@@ -59,7 +59,7 @@ spotting of any issues as they appeared
 frequently update on where to act next 
 ● Delivered the program on time and with high-quality, graded as an A+ 
 Solo Developer                                                                                                             
-AI Resume Matcher 
+CVSyncAI 
 September 2025-Present  
 ● Developing a program that matches resumes to job descriptions using Natural Language 
 Processing and transformer-based models, helping job seekers find jobs tailored to their resume   

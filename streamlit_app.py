@@ -1,15 +1,24 @@
 import streamlit as st
 import os
+import html
 import tempfile
 import json
 import re
 from datetime import datetime
+from dotenv import load_dotenv
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 from src.parsing.resume_parser import parse_resume_from_file
 from src.parsing.job_parser import parse_jobs_from_file
 from src.matching.matcher import match_resume_to_jobs
 from src.config.weights import SKILL_WEIGHTS
+from src.learning.pathways import get_learning_resources
+from src.generation.cover_letter import generate_cover_letter
+from src.generation.pdf_export import cover_letter_to_pdf
 
-st.set_page_config(page_title="AI Resume Matcher", layout="wide")
+load_dotenv()
+
+st.set_page_config(page_title="CVSyncAI", layout="wide")
 
 # Custom CSS for Design System
 st.markdown("""
@@ -161,10 +170,96 @@ st.markdown("""
         margin-right: 8px;
         border: 1px solid #404040;
     }
+
+    .upskill-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: #FBBF24;
+        margin-top: 8px;
+        margin-bottom: 12px;
+    }
+
+    .resource-card {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 14px;
+        margin-bottom: 6px;
+        background-color: #1A1A2E;
+        border: 1px solid #2A2A4A;
+        border-radius: 8px;
+        transition: border-color 0.2s ease, background-color 0.2s ease;
+    }
+
+    .resource-card:hover {
+        border-color: #FBBF24;
+        background-color: #1E1E36;
+    }
+
+    .resource-card a {
+        color: #93C5FD;
+        text-decoration: none;
+        font-weight: 500;
+        font-size: 0.88em;
+    }
+
+    .resource-card a:hover {
+        color: #BFDBFE;
+        text-decoration: underline;
+    }
+
+    .resource-type-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.72em;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        flex-shrink: 0;
+    }
+
+    .resource-type-video {
+        background-color: #7F1D1D;
+        color: #FCA5A5;
+    }
+
+    .resource-type-documentation {
+        background-color: #1E3A5F;
+        color: #93C5FD;
+    }
+
+    .resource-type-course {
+        background-color: #065F46;
+        color: #6EE7B7;
+    }
+
+    .resource-skill-label {
+        color: #9CA3AF;
+        font-size: 0.78em;
+        font-weight: 500;
+        margin-left: auto;
+        flex-shrink: 0;
+    }
     
     b {
         color: #60A5FA;
         font-weight: 600;
+    }
+
+
+    .cover-letter-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: #60A5FA;
+        margin-top: 8px;
+        margin-bottom: 12px;
     }
 
     /* Hide MainMenu and Footer ONLY */
@@ -175,8 +270,17 @@ st.markdown("""
 
 def save_uploaded_file(uploaded_file):
     """Save uploaded file to a temporary file and return the path."""
+    if uploaded_file.size > MAX_UPLOAD_BYTES:
+        st.error(f"File '{uploaded_file.name}' exceeds the 10 MB limit.")
+        return None
+
+    allowed_extensions = {".txt", ".pdf"}
+    suffix = os.path.splitext(uploaded_file.name)[1].lower()
+    if suffix not in allowed_extensions:
+        st.error(f"Unsupported file type: {suffix}")
+        return None
+
     try:
-        suffix = os.path.splitext(uploaded_file.name)[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
             return tmp_file.name
@@ -204,18 +308,19 @@ def render_skill_tags(skills, type="matched"):
         
         css_class = "skill-matched" if type == "matched" else "skill-missing"
         
-        display_text = skill
+        safe_skill = html.escape(skill)
+        display_text = safe_skill
         
         if type == "matched":
             if is_high_priority:
-                display_text = f"⭐ {skill}"
+                display_text = f"⭐ {safe_skill}"
         else:
             # missing
-            display_text = f"{skill} ({weight})"
+            display_text = f"{safe_skill} ({weight})"
             if is_high_priority:
-                display_text = f"⭐ {skill} ({weight})"
+                display_text = f"⭐ {safe_skill} ({weight})"
         
-        tags_html.append(f"<span class='skill-tag {css_class}'>{display_text}</span>")
+        tags_html.append(f"<span class='skill-tag {html.escape(css_class)}'>{display_text}</span>")
         
     return "".join(tags_html)
 
@@ -228,27 +333,54 @@ def highlight_evidence(line, skill_name):
     if not match:
         return line 
     
-    line_num_str = match.group(1)
+    line_num_str = html.escape(match.group(1))
     content = match.group(2)
     
-    pattern = re.compile(rf"(?<![a-z0-9]){re.escape(skill_name)}(?![a-z0-9])", re.IGNORECASE)
-    highlighted_content = pattern.sub(lambda m: f"<b>{m.group(0)}</b>", content)
+    safe_content = html.escape(content)
+    safe_skill_name = html.escape(skill_name)
+    
+    pattern = re.compile(rf"(?<![a-z0-9]){re.escape(safe_skill_name)}(?![a-z0-9])", re.IGNORECASE)
+    highlighted_content = pattern.sub(lambda m: f"<b>{m.group(0)}</b>", safe_content)
     
     return f"<span class='line-badge'>{line_num_str}</span>{highlighted_content}"
 
-def display_match_details(match):
-    """Helper to display skill breakdown and evidence."""
+def display_match_details(match, resume_data=None):
+    """Helper to display skill breakdown, evidence, and AI-powered resume optimization."""
     st.markdown(f"**✅ Matched Skills**")
     st.markdown(render_skill_tags(match['matched_skills'], "matched"), unsafe_allow_html=True)
     
-    st.write("") # Spacer using standard line height
+    st.write("")
 
     st.markdown(f"**❌ Missing Skills**")
     st.markdown(render_skill_tags(match['missing_skills'], "missing"), unsafe_allow_html=True)
 
+    resources = get_learning_resources(match.get("missing_skills", []))
+    if resources:
+        st.write("")
+        st.markdown("<div class='upskill-header'>Upskill Recommendations</div>", unsafe_allow_html=True)
+        grouped = {}
+        for r in resources:
+            grouped.setdefault(r["skill"], []).append(r)
+        for skill, entries in grouped.items():
+            for entry in entries:
+                type_css = f"resource-type-{html.escape(entry['type'].lower())}"
+                is_youtube = "youtube.com" in entry["url"] or "youtu.be" in entry["url"]
+                icon = "&#9654;" if is_youtube else "&#128196;"
+                safe_url = html.escape(entry["url"], quote=True)
+                safe_title = html.escape(entry["title"])
+                safe_type = html.escape(entry["type"])
+                safe_skill = html.escape(skill)
+                card_html = (
+                    f"<div class='resource-card'>"
+                    f"<span class='resource-type-badge {type_css}'>{safe_type}</span>"
+                    f"<a href='{safe_url}' target='_blank'>{icon} {safe_title}</a>"
+                    f"<span class='resource-skill-label'>{safe_skill}</span>"
+                    f"</div>"
+                )
+                st.markdown(card_html, unsafe_allow_html=True)
+
     st.write("")
 
-    # Evidence Section
     job_evidence_count = len(match['evidence']['job'])
     resume_evidence_count = len(match['evidence']['resume'])
     total_evidence = job_evidence_count + resume_evidence_count
@@ -273,10 +405,54 @@ def display_match_details(match):
         if total_evidence == 0:
             st.caption("No specific evidence snippets found.")
 
+    if resume_data:
+        _render_cover_letter_section(match, resume_data)
+
+
+def _render_cover_letter_section(match, resume_data):
+    """Render a Draft Cover Letter button with editable output and PDF export."""
+    job_id = match.get("job_id", match.get("title", ""))
+    cache_key = f"cover_letter_{job_id}"
+    button_key = f"btn_cover_{job_id}"
+    area_key = f"area_cover_{job_id}"
+
+    if st.button("Draft Cover Letter", key=button_key):
+        with st.spinner("Generating cover letter..."):
+            letter = generate_cover_letter(resume_data, match)
+        st.session_state[cache_key] = letter
+
+    if cache_key in st.session_state:
+        st.markdown(
+            "<div class='cover-letter-header'>Generated Cover Letter</div>",
+            unsafe_allow_html=True,
+        )
+
+        edited_letter = st.text_area(
+            "Edit your cover letter below",
+            value=st.session_state[cache_key],
+            height=320,
+            key=area_key,
+            label_visibility="collapsed",
+        )
+
+        title = match.get("title", "Position")
+        company = match.get("company", "Company")
+        pdf_bytes = cover_letter_to_pdf(edited_letter, title, company)
+        safe_name = re.sub(r"[^\w\s-]", "", f"{title}_{company}").strip().replace(" ", "_")
+
+        st.download_button(
+            label="Download as PDF",
+            data=pdf_bytes,
+            file_name=f"cover_letter_{safe_name}.pdf",
+            mime="application/pdf",
+            key=f"dl_cover_{job_id}",
+        )
+
+
 def main():
     # Header Section
     st.markdown("""
-        <div class="main-title">AI Resume Matcher</div>
+        <div class="main-title">CVSyncAI</div>
         <div class="subtitle">Intelligent skill extraction and semantic matching for modern recruitment</div>
     """, unsafe_allow_html=True)
     
@@ -408,9 +584,10 @@ def main():
                         col_idx = i % num_cols
                         with cols[col_idx]:
                             with st.container(border=True):
-                                # Typography classes applied here
-                                st.markdown(f"<div class='job-title'>#{i+1} {match['title']}</div>", unsafe_allow_html=True)
-                                st.markdown(f"<div class='company-name'>{match['company']}</div>", unsafe_allow_html=True)
+                                safe_title = html.escape(match['title'])
+                                safe_company = html.escape(match['company'])
+                                st.markdown(f"<div class='job-title'>#{i+1} {safe_title}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div class='company-name'>{safe_company}</div>", unsafe_allow_html=True)
                                 
                                 st.metric(
                                     "Total Score", 
@@ -419,7 +596,7 @@ def main():
                                 )
                                 
                                 st.divider()
-                                display_match_details(match)
+                                display_match_details(match, resume_data=resume_data)
 
                 if other_matches:
                     st.subheader("Other Matches")
@@ -432,7 +609,7 @@ def main():
                             m_col3.metric("Weighted Skills", f"{match['matched_weight']}/{match['total_weight']}")
                             
                             st.divider()
-                            display_match_details(match)
+                            display_match_details(match, resume_data=resume_data)
 
 if __name__ == "__main__":
     main()

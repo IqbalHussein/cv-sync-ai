@@ -166,7 +166,18 @@ def split_resume_sections(resume_text: str) -> Dict[str, str]:
         if _looks_like_heading(line):
             # We hit a new section heading
             heading_norm = _normalize_heading(line)
-            canonical = HEADING_ALIASES.get(heading_norm, "other")
+            canonical = HEADING_ALIASES.get(heading_norm)
+            if not canonical:
+                if any(k in heading_norm for k in ("experience", "history", "employment", "work")):
+                    canonical = "experience"
+                elif "project" in heading_norm:
+                    canonical = "projects"
+                elif any(k in heading_norm for k in ("skill", "technologies", "tech stack")):
+                    canonical = "skills"
+                elif any(k in heading_norm for k in ("education", "academic", "degree")):
+                    canonical = "education"
+                else:
+                    canonical = "other"
 
             # If this is the first heading, preamble becomes summary
             if current_section is None:

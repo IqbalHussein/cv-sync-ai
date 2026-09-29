@@ -1,9 +1,24 @@
-from src.config.skills import NOISE_SUBSTRINGS, META_SUBSTRINGS, TITLE_KEYWORDS, SOFT_ENG_SKILLS
+from src.config.skills import NOISE_SUBSTRINGS, NOISE_EXACT_LINES, META_SUBSTRINGS, TITLE_KEYWORDS, SOFT_ENG_SKILLS
+import logging
 import re
 from src.parsing.text_utilities import read_text_file, normalize_text
 from src.parsing.skills_extraction import extract_skills
 
+logger = logging.getLogger(__name__)
+
+PROVINCE_CODE_RE = re.compile(r"\b(ON|QC|BC|AB|MB|NS|NB|NL|PE|SK|YT|NT|NU)\b")
+
 def parse_jobs_from_file(filename):
+    """
+    Parse job postings from a text file into structured job records.
+
+    Convenience wrapper around parse_jobs_with_stats() that discards the
+    skipped-posting count.
+    """
+    jobs, _ = parse_jobs_with_stats(filename)
+    return jobs
+
+def parse_jobs_with_stats(filename) -> tuple[list[dict], int]:
     """
     Parse job postings from a text file into structured job records.
     
@@ -15,12 +30,15 @@ def parse_jobs_from_file(filename):
         filename: Path to the file containing job postings
         
     Returns:
-        List of job dictionaries, each containing:
+        Tuple of (jobs, skipped) where jobs is a list of job dictionaries, each containing:
         - 'id': Sequential job ID
         - 'title': Job title
         - 'company': Company name
         - 'skills': List of extracted technical skills
         - 'text': Original job posting text
+        and skipped is the number of postings dropped because no title or
+        company could be identified. "Profile insights" overlay chunks are
+        not postings and are not counted.
     """
     def clean_lines(job_text: str) -> list[str]:
         """
@@ -41,7 +59,9 @@ def parse_jobs_from_file(filename):
         Determine if a line contains noise/boilerplate text to be filtered out.
         
         Checks against common LinkedIn/Indeed UI elements like "Easy Apply",
-        "Show more", "Benefits", etc.
+        "Show more", "Benefits", etc. Short labels in NOISE_EXACT_LINES only
+        count when they are the whole line, so titles like "Applied ML
+        Engineer" are kept.
         
         Args:
             line: Text line to check
@@ -50,6 +70,8 @@ def parse_jobs_from_file(filename):
             True if line is noise and should be filtered, False otherwise
         """
         l = line.lower()
+        if l.strip().rstrip(":") in NOISE_EXACT_LINES:
+            return True
         return any(s in l for s in NOISE_SUBSTRINGS)
 
     def is_rating(line: str) -> bool:
@@ -100,7 +122,7 @@ def parse_jobs_from_file(filename):
         if "·" in line and any(s in l for s in META_SUBSTRINGS):
             return True
         # Canadian provincial & territorial locations
-        if any(tok in line for tok in ["ON", "QC", "BC", "AB", "MB", "NS", "NB", "NL", "PE", "SK", "YT", "NT", "NU"]):
+        if PROVINCE_CODE_RE.search(line):
             if "·" in line or "," in line or "(" in line:
                 return True
         if "hybrid" in l or "remote" in l or "on-site" in l:
@@ -221,6 +243,7 @@ def parse_jobs_from_file(filename):
     jobs = raw_file_data.split("====")
 
     structured_jobs = []
+    skipped = 0
     for idx, job in enumerate(jobs):
         # Split the job posting into lines and remove empty lines
         lines = job.splitlines()
@@ -235,6 +258,9 @@ def parse_jobs_from_file(filename):
         title, company = extract_title_company(job)
 
         if title is None or company is None:
+            if lines[0].lower() != "profile insights":
+                skipped += 1
+                logger.warning("Skipped posting #%d: could not identify title/company (%r)", idx + 1, lines[0][:60])
             continue
 
         job_record = {
@@ -247,4 +273,4 @@ def parse_jobs_from_file(filename):
 
         structured_jobs.append(job_record)
         
-    return structured_jobs
+    return structured_jobs, skipped

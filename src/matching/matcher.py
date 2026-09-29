@@ -1,8 +1,8 @@
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from src.config.weights import SKILL_WEIGHTS
+from src.config.weights import SKILL_WEIGHTS, SKILL_SCORE_WEIGHT
 from src.matching.evidence import find_skill_evidence
-from src.matching.semantic import SemanticMatcher
+from src.matching.semantic import get_semantic_matcher
 import re
 from typing import Callable, Optional
 
@@ -17,6 +17,9 @@ def _clean_evidence(evidence_list: list[str]) -> str:
         text = re.sub(r"^L\d+:\s*", "", line)
         clean_text.append(text)
     return " ".join(clean_text)
+
+JOB_EMBED_BATCH = 8
+EMBED_PROGRESS_SHARE = 0.8
 
 def match_resume_to_jobs(
     structured_jobs: list[dict], 
@@ -36,17 +39,23 @@ def match_resume_to_jobs(
     - 50% Resume Experience vs Job Text (Requirements)
     - 30% Resume Full Text vs Job Full Text
     - 20% Resume Skills Text vs Job Skills List
+
+    The final score blends the two: SKILL_SCORE_WEIGHT * skill score +
+    (1 - SKILL_SCORE_WEIGHT) * semantic score. Without resume_data, the
+    final score equals the skill score.
     
     Args:
         structured_jobs: List of job dictionaries with 'skills', 'text', etc.
         resume: List of skill strings from the resume (legacy/fallback).
         resume_data: Complete resume dictionary containing 'text' and 'sections'.
         progress_callback: Optional function to report progress (0.0 to 1.0).
+            When semantic matching runs, the first EMBED_PROGRESS_SHARE of
+            progress covers batched job embedding and the rest covers scoring.
         
     Returns:
-        List of match result dictionaries sorted by score (descending), each containing:
+        List of match result dictionaries sorted by final_score (descending), each containing:
         - Basic job info (id, title, company)
-        - Match metrics (score, matched_count, matched_weight, total_weight, semantic_score)
+        - Match metrics (final_score, score, semantic_score, matched_count, matched_weight, total_weight)
         - Skill breakdowns (matched_skills, missing_skills)
         - Evidence snippets showing where skills appear in job and resume
     """
@@ -68,7 +77,7 @@ def match_resume_to_jobs(
         resume_context_text = resume_data.get("text")
 
     if resume_data:
-        semantic_matcher = SemanticMatcher()
+        semantic_matcher = get_semantic_matcher()
         
         # Extract sections
         res_text_full = resume_data.get("text", "")
@@ -79,11 +88,26 @@ def match_resume_to_jobs(
             res_text_skills = " ".join(resume)
 
         # Encode once
-        res_emb_full = semantic_matcher.encode(res_text_full)
-        res_emb_exp = semantic_matcher.encode(res_text_exp)
-        res_emb_skills = semantic_matcher.encode(res_text_skills)
+        res_emb_full, res_emb_exp, res_emb_skills = semantic_matcher.encode_many(
+            [res_text_full, res_text_exp, res_text_skills]
+        )
 
     total_jobs = len(structured_jobs)
+    score_progress_start = 0.0
+
+    job_embs_full = []
+    job_embs_skills = []
+    if semantic_matcher:
+        score_progress_start = EMBED_PROGRESS_SHARE
+        for start in range(0, total_jobs, JOB_EMBED_BATCH):
+            batch = structured_jobs[start:start + JOB_EMBED_BATCH]
+            texts = [job.get("text", "") for job in batch]
+            texts += [", ".join(job.get("skills", [])) for job in batch]
+            embs = semantic_matcher.encode_many(texts)
+            job_embs_full.extend(embs[:len(batch)])
+            job_embs_skills.extend(embs[len(batch):])
+            if progress_callback:
+                progress_callback(EMBED_PROGRESS_SHARE * (start + len(batch)) / total_jobs)
     
     for i, job in enumerate(structured_jobs):
         job_skills = job.get("skills", [])
@@ -96,13 +120,9 @@ def match_resume_to_jobs(
         # --- Semantic Matching ---
         semantic_score = 0.0
         if semantic_matcher and res_emb_full is not None:
-            # Job embeddings
             # We treat the full job text as the "Requirements" for comparison with Experience
-            job_emb_full = semantic_matcher.encode(job_text)
-            
-            # Job skills text
-            job_skills_str = ", ".join(job_skills)
-            job_emb_skills = semantic_matcher.encode(job_skills_str)
+            job_emb_full = job_embs_full[i]
+            job_emb_skills = job_embs_skills[i]
             
             # Calculate components
             # 1. Experience vs Job Requirements (Full Text) - 50%
@@ -163,10 +183,16 @@ def match_resume_to_jobs(
 
         score = matched_weight / max(1e-9, total_weight)  # avoid divide-by-zero
 
+        if semantic_matcher:
+            final_score = SKILL_SCORE_WEIGHT * score + (1 - SKILL_SCORE_WEIGHT) * semantic_score
+        else:
+            final_score = score
+
         results.append({
             "job_id": job.get("id"),
             "title": job.get("title"),
             "company": job.get("company"),
+            "final_score": round(final_score, 3),
             "score": round(score, 3),
             "semantic_score": round(semantic_score, 3),
             "matched_skills": matched,
@@ -182,7 +208,7 @@ def match_resume_to_jobs(
         })
         
         if progress_callback:
-            progress_callback((i + 1) / total_jobs)
+            progress_callback(score_progress_start + (1 - score_progress_start) * (i + 1) / total_jobs)
 
-    results.sort(key=lambda x: (x["score"], x["semantic_score"], x["matched_weight"], x["matched_count"]), reverse=True)
+    results.sort(key=lambda x: (x["final_score"], x["score"], x["semantic_score"], x["matched_weight"]), reverse=True)
     return results

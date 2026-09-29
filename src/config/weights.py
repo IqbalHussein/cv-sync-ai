@@ -1,3 +1,5 @@
+from src.config.skills import SOFT_ENG_SKILLS
+
 SKILL_WEIGHTS = {
     # Cloud / DevOps
     "AWS": 3.0,
@@ -37,3 +39,8 @@ SKILL_WEIGHTS = {
     "NoSQL": 1.5,
     "Pip": 1.0,
 }
+
+SKILL_SCORE_WEIGHT = 0.7
+
+_unknown = set(SKILL_WEIGHTS) - set(SOFT_ENG_SKILLS)
+assert not _unknown, f"SKILL_WEIGHTS keys missing from SOFT_ENG_SKILLS: {sorted(_unknown)}"

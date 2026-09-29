@@ -4,17 +4,18 @@ import html
 import tempfile
 import json
 import re
-from datetime import datetime
 from dotenv import load_dotenv
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 from src.parsing.resume_parser import parse_resume_from_file
-from src.parsing.job_parser import parse_jobs_from_file
+from src.parsing.job_parser import parse_jobs_with_stats
 from src.matching.matcher import match_resume_to_jobs
+from src.matching.semantic import get_semantic_matcher
 from src.config.weights import SKILL_WEIGHTS
 from src.learning.pathways import get_learning_resources
-from src.generation.cover_letter import generate_cover_letter
+from src.generation.cover_letter import generate_cover_letter, CoverLetterError
 from src.generation.pdf_export import cover_letter_to_pdf
+from src.reporting import build_match_report
 
 load_dotenv()
 
@@ -268,6 +269,11 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+@st.cache_resource(show_spinner="Loading language model...")
+def load_semantic_matcher():
+    """Load the sentence-transformer once per server process, shared across sessions and reruns."""
+    return get_semantic_matcher()
+
 def save_uploaded_file(uploaded_file):
     """Save uploaded file to a temporary file and return the path."""
     if uploaded_file.size > MAX_UPLOAD_BYTES:
@@ -410,7 +416,12 @@ def display_match_details(match, resume_data=None):
 
 
 def _render_cover_letter_section(match, resume_data):
-    """Render a Draft Cover Letter button with editable output and PDF export."""
+    """
+    Render a Draft Cover Letter button with editable output and PDF export.
+
+    A new draft clears previous edits in the text area. The PDF is rendered
+    lazily from the current edited text only when Download is clicked.
+    """
     job_id = match.get("job_id", match.get("title", ""))
     cache_key = f"cover_letter_{job_id}"
     button_key = f"btn_cover_{job_id}"
@@ -418,8 +429,11 @@ def _render_cover_letter_section(match, resume_data):
 
     if st.button("Draft Cover Letter", key=button_key):
         with st.spinner("Generating cover letter..."):
-            letter = generate_cover_letter(resume_data, match)
-        st.session_state[cache_key] = letter
+            try:
+                st.session_state[cache_key] = generate_cover_letter(resume_data, match)
+                st.session_state.pop(area_key, None)
+            except CoverLetterError as e:
+                st.error(str(e))
 
     if cache_key in st.session_state:
         st.markdown(
@@ -427,7 +441,7 @@ def _render_cover_letter_section(match, resume_data):
             unsafe_allow_html=True,
         )
 
-        edited_letter = st.text_area(
+        st.text_area(
             "Edit your cover letter below",
             value=st.session_state[cache_key],
             height=320,
@@ -437,12 +451,13 @@ def _render_cover_letter_section(match, resume_data):
 
         title = match.get("title", "Position")
         company = match.get("company", "Company")
-        pdf_bytes = cover_letter_to_pdf(edited_letter, title, company)
         safe_name = re.sub(r"[^\w\s-]", "", f"{title}_{company}").strip().replace(" ", "_")
 
         st.download_button(
             label="Download as PDF",
-            data=pdf_bytes,
+            data=lambda: cover_letter_to_pdf(
+                st.session_state.get(area_key, st.session_state[cache_key]), title, company
+            ),
             file_name=f"cover_letter_{safe_name}.pdf",
             mime="application/pdf",
             key=f"dl_cover_{job_id}",
@@ -458,8 +473,8 @@ def main():
     
     # Sidebar Filters
     st.sidebar.header("Configuration")
-    min_score = st.sidebar.slider("Minimum Score", 0.0, 1.0, 0.0, 0.01)
-    sort_by = st.sidebar.radio("Sort By", ["Weighted Score", "Semantic Similarity"])
+    min_score = st.sidebar.slider("Minimum Match Score", 0.0, 1.0, 0.0, 0.01)
+    sort_by = st.sidebar.radio("Sort By", ["Match Score", "Skill Score", "Semantic Similarity"])
 
     col1, col2 = st.columns(2)
 
@@ -489,6 +504,7 @@ def main():
             st.session_state.processed_matches = None
             st.session_state.resume_data = None
             st.session_state.jobs_len = 0
+            st.session_state.jobs_skipped = 0
 
         if st.session_state.processed_matches is None:
             resume_path = save_uploaded_file(resume_file)
@@ -501,12 +517,15 @@ def main():
                     resume_data = parse_resume_from_file(resume_path)
                     progress_bar.progress(10, text="Parsing Resume...")
                     
-                    jobs_data = parse_jobs_from_file(jobs_path)
-                    progress_bar.progress(20, text="Parsing Job Postings...")
+                    jobs_data, jobs_skipped = parse_jobs_with_stats(jobs_path)
+                    progress_bar.progress(20, text="Loading language model...")
+
+                    load_semantic_matcher()
+                    progress_bar.progress(30, text="Matching...")
                     
                     def update_progress(p):
                         current = 30 + int(p * 70)
-                        progress_bar.progress(current, text=f"Matching Job {int(p * len(jobs_data))}/{len(jobs_data)}")
+                        progress_bar.progress(current, text=f"Matching jobs... {int(p * 100)}%")
 
                     matches = match_resume_to_jobs(
                         jobs_data, 
@@ -520,6 +539,7 @@ def main():
                     st.session_state.processed_matches = matches
                     st.session_state.resume_data = resume_data
                     st.session_state.jobs_len = len(jobs_data)
+                    st.session_state.jobs_skipped = jobs_skipped
 
                 except Exception as e:
                     st.error(f"An error occurred during processing: {e}")
@@ -531,33 +551,24 @@ def main():
         resume_data = st.session_state.resume_data
         
         if matches:
-            filtered_matches = [m for m in matches if m['score'] >= min_score]
+            filtered_matches = [m for m in matches if m['final_score'] >= min_score]
             
-            if sort_by == "Semantic Similarity":
-                filtered_matches.sort(key=lambda x: x['semantic_score'], reverse=True)
-            else:
-                filtered_matches.sort(key=lambda x: x['score'], reverse=True)
+            sort_keys = {
+                "Match Score": "final_score",
+                "Skill Score": "score",
+                "Semantic Similarity": "semantic_score",
+            }
+            filtered_matches.sort(key=lambda x: x[sort_keys[sort_by]], reverse=True)
 
             st.success(f"Processed {st.session_state.jobs_len} job postings successfully! Showing {len(filtered_matches)} matches.")
+            skipped = st.session_state.get("jobs_skipped", 0)
+            if skipped:
+                st.warning(
+                    f"{skipped} posting(s) were skipped because no job title or company could be identified. "
+                    "Check that postings are separated by '===='."
+                )
             
-            match_report = {
-                "generated_at": datetime.utcnow().isoformat() + "Z",
-                "resume": {
-                    "skills_used": resume_data["skills_all"] if resume_data else []
-                },
-                "results": []
-            }
-            for rank, r in enumerate(matches, start=1):
-                match_report["results"].append({
-                    "rank": rank,
-                    "title": r["title"],
-                    "company": r["company"],
-                    "score": round(r["score"], 3),
-                    "semantic_score": r.get("semantic_score", 0),
-                    "matched_skills": r["matched_skills"],
-                    "missing_skills": r["missing_skills"]
-                })
-            
+            match_report = build_match_report(matches, resume_data["skills_all"] if resume_data else [])
             report_json = json.dumps(match_report, indent=2, ensure_ascii=False)
             st.download_button(
                 label="Download Match Report (JSON)",
@@ -589,10 +600,9 @@ def main():
                                 st.markdown(f"<div class='job-title'>#{i+1} {safe_title}</div>", unsafe_allow_html=True)
                                 st.markdown(f"<div class='company-name'>{safe_company}</div>", unsafe_allow_html=True)
                                 
-                                st.metric(
-                                    "Total Score", 
-                                    f"{match['score']:.2f}", 
-                                    delta=f"Semantic: {match['semantic_score']:.2f}"
+                                st.metric("Match Score", f"{match['final_score']:.2f}")
+                                st.caption(
+                                    f"Skills {match['score']:.2f} · Semantic {match['semantic_score']:.2f}"
                                 )
                                 
                                 st.divider()
@@ -602,11 +612,12 @@ def main():
                     st.subheader("Other Matches")
                     for rank_offset, match in enumerate(other_matches, 1):
                         rank = len(top_matches) + rank_offset
-                        with st.expander(f"#{rank} {match['title']} at {match['company']} (Score: {match['score']:.2f})"):
-                            m_col1, m_col2, m_col3 = st.columns(3)
-                            m_col1.metric("Total Score", f"{match['score']:.2f}")
-                            m_col2.metric("Semantic Similarity", f"{match['semantic_score']:.2f}")
-                            m_col3.metric("Weighted Skills", f"{match['matched_weight']}/{match['total_weight']}")
+                        with st.expander(f"#{rank} {match['title']} at {match['company']} (Score: {match['final_score']:.2f})"):
+                            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                            m_col1.metric("Match Score", f"{match['final_score']:.2f}")
+                            m_col2.metric("Skill Score", f"{match['score']:.2f}")
+                            m_col3.metric("Semantic Similarity", f"{match['semantic_score']:.2f}")
+                            m_col4.metric("Weighted Skills", f"{match['matched_weight']}/{match['total_weight']}")
                             
                             st.divider()
                             display_match_details(match, resume_data=resume_data)

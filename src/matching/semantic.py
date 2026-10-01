@@ -1,7 +1,9 @@
+import os
+
 from sentence_transformers import SentenceTransformer, util
 import torch
 
-DEFAULT_MODEL = 'all-MiniLM-L6-v2'
+DEFAULT_MODEL = os.environ.get("SEMANTIC_MODEL", "all-MiniLM-L6-v2")
 
 CHUNK_WORDS = 150
 

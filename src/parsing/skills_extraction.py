@@ -1,6 +1,6 @@
 import spacy
 from spacy.language import Language
-from src.config.skills import ALIASES, STRICT_SKILLS, SOFT_ENG_SKILLS
+from src.config.skills import ALIASES, STRICT_SKILLS, SOFT_ENG_SKILLS, ALL_SKILLS, PROPER_NOUN_SKILLS
 import subprocess
 import sys
 
@@ -11,7 +11,7 @@ def _get_nlp() -> Language:
     Load and configure the spaCy model with a custom EntityRuler for skills.
     
     The model is cached in a global variable to avoid reloading overhead.
-    Patterns are generated from STRICT_SKILLS, ALIASES, and SOFT_ENG_SKILLS.
+    Patterns are generated from STRICT_SKILLS, ALIASES, PROPER_NOUN_SKILLS and ALL_SKILLS.
     """
     global _nlp
     if _nlp is not None:
@@ -42,17 +42,24 @@ def _get_nlp() -> Language:
         pattern = [{"LOWER": token.text.lower()} for token in doc]
         patterns.append({"label": "SKILL", "pattern": pattern, "id": canonical})
 
-    strict_canonicals = set(STRICT_SKILLS.values())
-    
-    for skill in SOFT_ENG_SKILLS:
-        if skill in strict_canonicals:
+    for word, canonical in PROPER_NOUN_SKILLS.items():
+        patterns.append({"label": "SKILL", "pattern": [{"ORTH": word, "POS": {"NOT_IN": ["VERB", "AUX"]}}], "id": canonical})
+
+    special = set(STRICT_SKILLS.values()) | set(PROPER_NOUN_SKILLS.values())
+    software = set(SOFT_ENG_SKILLS)
+
+    for skill in ALL_SKILLS:
+        if skill in special:
             continue
-            
+
         doc = nlp(skill)
-        
-        pattern_lemma = [{"LEMMA": token.lemma_} for token in doc]
-        patterns.append({"label": "SKILL", "pattern": pattern_lemma, "id": skill})
-        
+
+        # Lemma matching catches inflections ("journal entry" / "journal entries"),
+        # but for single non-software words it over-matches ("Purchasing" -> "purchase").
+        if skill in software or len(doc) > 1:
+            pattern_lemma = [{"LEMMA": token.lemma_} for token in doc]
+            patterns.append({"label": "SKILL", "pattern": pattern_lemma, "id": skill})
+
         pattern_lower = [{"LOWER": token.text.lower()} for token in doc]
         patterns.append({"label": "SKILL", "pattern": pattern_lower, "id": skill})
 

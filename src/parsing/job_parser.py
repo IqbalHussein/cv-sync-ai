@@ -1,4 +1,4 @@
-from src.config.skills import NOISE_SUBSTRINGS, NOISE_EXACT_LINES, META_SUBSTRINGS, TITLE_KEYWORDS, SOFT_ENG_SKILLS
+from src.config.skills import NOISE_SUBSTRINGS, NOISE_EXACT_LINES, META_SUBSTRINGS, TITLE_KEYWORDS, ALL_SKILLS
 import logging
 import re
 from src.parsing.text_utilities import read_text_file, normalize_text
@@ -253,7 +253,7 @@ def parse_jobs_with_stats(filename) -> tuple[list[dict], int]:
             continue
 
         # Pull skills from job postings
-        found_skills = extract_skills(job, SOFT_ENG_SKILLS)
+        found_skills = extract_skills(job, ALL_SKILLS)
 
         title, company = extract_title_company(job)
 

@@ -1,7 +1,7 @@
 import re
 from typing import Dict, List, Optional
 from src.parsing.text_utilities import read_text_file, read_pdf_file, normalize_text
-from src.config.skills import SOFT_ENG_SKILLS
+from src.config.skills import ALL_SKILLS
 from src.parsing.skills_extraction import extract_skills
 
 
@@ -238,8 +238,8 @@ def parse_resume_from_file(filename):
     
     sections = split_resume_sections(resume_text)
 
-    skills_all = extract_skills(resume_text, SOFT_ENG_SKILLS)
-    skills_section = extract_skills(sections.get("skills", ""), SOFT_ENG_SKILLS)
+    skills_all = extract_skills(resume_text, ALL_SKILLS)
+    skills_section = extract_skills(sections.get("skills", ""), ALL_SKILLS)
 
     return {
         "text": resume_text,

@@ -1,4 +1,4 @@
-from src.config.skills import SOFT_ENG_SKILLS
+from src.config.skills import ALL_SKILLS
 
 SKILL_WEIGHTS = {
     # Cloud / DevOps
@@ -40,7 +40,9 @@ SKILL_WEIGHTS = {
     "Pip": 1.0,
 }
 
-SKILL_SCORE_WEIGHT = 0.7
+# Tuned on the resume/JD fit benchmark train split (see benchmarks/FIT_RESULTS.md):
+# semantic similarity carries most of the signal; a small skill share breaks ties.
+SKILL_SCORE_WEIGHT = 0.1
 
-_unknown = set(SKILL_WEIGHTS) - set(SOFT_ENG_SKILLS)
-assert not _unknown, f"SKILL_WEIGHTS keys missing from SOFT_ENG_SKILLS: {sorted(_unknown)}"
+_unknown = set(SKILL_WEIGHTS) - set(ALL_SKILLS)
+assert not _unknown, f"SKILL_WEIGHTS keys missing from ALL_SKILLS: {sorted(_unknown)}"

@@ -21,11 +21,49 @@ def _clean_evidence(evidence_list: list[str]) -> str:
 JOB_EMBED_BATCH = 8
 EMBED_PROGRESS_SHARE = 0.8
 
+# Semantic score = weighted sum of (resume experience vs job text,
+# resume full text vs job text, resume skills vs job skills).
+SEMANTIC_COMPONENT_WEIGHTS = (0.5, 0.3, 0.2)
+
+
+def resume_semantic_texts(resume_data: dict, resume_skills: list[str]) -> list[str]:
+    """Return the [full text, experience section, skills text] embedded for a resume."""
+    full = resume_data.get("text", "")
+    experience = resume_data.get("sections", {}).get("experience", "")
+    # Try specific skills section, fallback to joined list of extracted skills
+    skills = resume_data.get("sections", {}).get("skills", "")
+    if not skills and resume_skills:
+        skills = " ".join(resume_skills)
+    return [full, experience, skills]
+
+
+def job_semantic_texts(job: dict) -> list[str]:
+    """Return the [full text, skills text] embedded for a job."""
+    return [job.get("text", ""), ", ".join(job.get("skills", []))]
+
+
+def semantic_score_from_embeddings(semantic_matcher, resume_embs, job_emb_full, job_emb_skills) -> float:
+    """
+    Combine component similarities into a single semantic score.
+
+    The full job text stands in for the job's requirements when compared
+    with the resume's experience section. Negative similarities are clamped
+    to 0 so they don't drag the score down.
+    """
+    res_full, res_exp, res_skills = resume_embs
+    sims = [
+        semantic_matcher.compute_similarity_score(res_exp, job_emb_full),
+        semantic_matcher.compute_similarity_score(res_full, job_emb_full),
+        semantic_matcher.compute_similarity_score(res_skills, job_emb_skills),
+    ]
+    return sum(w * max(0.0, s) for w, s in zip(SEMANTIC_COMPONENT_WEIGHTS, sims))
+
 def match_resume_to_jobs(
     structured_jobs: list[dict], 
     resume: list[str], 
     resume_data: dict = None,
-    progress_callback: Optional[Callable[[float], None]] = None
+    progress_callback: Optional[Callable[[float], None]] = None,
+    semantic: bool = True,
 ) -> list[dict]:
     """
     Match a resume against multiple job postings using weighted skill scoring and multi-factor semantic analysis.
@@ -48,6 +86,8 @@ def match_resume_to_jobs(
         structured_jobs: List of job dictionaries with 'skills', 'text', etc.
         resume: List of skill strings from the resume (legacy/fallback).
         resume_data: Complete resume dictionary containing 'text' and 'sections'.
+        semantic: Set False to skip embeddings and score skills only, while still
+            using resume_data's full text for evidence and context checks.
         progress_callback: Optional function to report progress (0.0 to 1.0).
             When semantic matching runs, the first EMBED_PROGRESS_SHARE of
             progress covers batched job embedding and the rest covers scoring.
@@ -64,11 +104,7 @@ def match_resume_to_jobs(
 
     semantic_matcher = None
     tfidf_vectorizer = TfidfVectorizer(stop_words='english')
-    
-    # Pre-compute resume embeddings if data is available
-    res_emb_full = None
-    res_emb_exp = None
-    res_emb_skills = None
+    resume_embs = None
 
     # Determine source text for resume evidence
     # Prefer full text from resume_data to get actual context sentences
@@ -76,21 +112,10 @@ def match_resume_to_jobs(
     if resume_data and resume_data.get("text"):
         resume_context_text = resume_data.get("text")
 
-    if resume_data:
+    if resume_data and semantic:
         semantic_matcher = get_semantic_matcher()
-        
-        # Extract sections
-        res_text_full = resume_data.get("text", "")
-        res_text_exp = resume_data.get("sections", {}).get("experience", "")
-        # Try specific skills section, fallback to joined list of extracted skills
-        res_text_skills = resume_data.get("sections", {}).get("skills", "")
-        if not res_text_skills and resume:
-            res_text_skills = " ".join(resume)
-
         # Encode once
-        res_emb_full, res_emb_exp, res_emb_skills = semantic_matcher.encode_many(
-            [res_text_full, res_text_exp, res_text_skills]
-        )
+        resume_embs = semantic_matcher.encode_many(resume_semantic_texts(resume_data, resume))
 
     total_jobs = len(structured_jobs)
     score_progress_start = 0.0
@@ -101,8 +126,8 @@ def match_resume_to_jobs(
         score_progress_start = EMBED_PROGRESS_SHARE
         for start in range(0, total_jobs, JOB_EMBED_BATCH):
             batch = structured_jobs[start:start + JOB_EMBED_BATCH]
-            texts = [job.get("text", "") for job in batch]
-            texts += [", ".join(job.get("skills", [])) for job in batch]
+            job_texts = [job_semantic_texts(job) for job in batch]
+            texts = [full for full, _ in job_texts] + [skills for _, skills in job_texts]
             embs = semantic_matcher.encode_many(texts)
             job_embs_full.extend(embs[:len(batch)])
             job_embs_skills.extend(embs[len(batch):])
@@ -119,28 +144,10 @@ def match_resume_to_jobs(
         
         # --- Semantic Matching ---
         semantic_score = 0.0
-        if semantic_matcher and res_emb_full is not None:
-            # We treat the full job text as the "Requirements" for comparison with Experience
-            job_emb_full = job_embs_full[i]
-            job_emb_skills = job_embs_skills[i]
-            
-            # Calculate components
-            # 1. Experience vs Job Requirements (Full Text) - 50%
-            sim_exp = semantic_matcher.compute_similarity_score(res_emb_exp, job_emb_full)
-            
-            # 2. Full vs Full - 30%
-            sim_full = semantic_matcher.compute_similarity_score(res_emb_full, job_emb_full)
-            
-            # 3. Skills vs Skills - 20%
-            sim_skills = semantic_matcher.compute_similarity_score(res_emb_skills, job_emb_skills)
-            
-            # Weighted Aggregate
-            # Ensure negative similarities don't drag down score too much
-            sim_exp = max(0.0, sim_exp)
-            sim_full = max(0.0, sim_full)
-            sim_skills = max(0.0, sim_skills)
-            
-            semantic_score = (0.5 * sim_exp) + (0.3 * sim_full) + (0.2 * sim_skills)
+        if semantic_matcher:
+            semantic_score = semantic_score_from_embeddings(
+                semantic_matcher, resume_embs, job_embs_full[i], job_embs_skills[i]
+            )
 
         # Gather Evidence
         job_evidence = find_skill_evidence(job_text, matched)

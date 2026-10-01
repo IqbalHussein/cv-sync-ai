@@ -66,7 +66,7 @@ def generate_cover_letter(resume_data: dict, match_result: dict) -> str:
         skills=", ".join(skills),
         title=title,
         company=company,
-        matched_skills=", ".join(matched_skills) if matched_skills else "general technical skills",
+        matched_skills=", ".join(matched_skills) if matched_skills else "general professional skills",
     )
 
     try:
